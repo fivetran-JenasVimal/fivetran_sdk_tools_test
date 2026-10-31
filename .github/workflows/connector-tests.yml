@@ -159,11 +159,12 @@ jobs:
                   reasons.append("dependency install failed")
               else:
                   cov_target = "connector" if Path(connector, "connector.py").is_file() else "."
-                  junit = Path(connector, "junit.xml")
+                  junit_name = "junit.xml"
+                  junit = Path(connector, junit_name)
                   result = subprocess.run(
                       [
                           str(python), "-m", "pytest", ".", "-v",
-                          f"--junitxml={junit}",
+                          f"--junitxml={junit_name}",
                           f"--cov={cov_target}",
                           "--cov-report=term",
                           f"--cov-fail-under={coverage_min}",
