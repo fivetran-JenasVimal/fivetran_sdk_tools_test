@@ -1,0 +1,114 @@
+name: Connector Tests
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  detect:
+    name: Detect changed connectors with tests
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.find.outputs.matrix }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Find changed connectors that have a tests directory
+        id: find
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          python3 <<'EOF'
+          import json
+          import os
+          import pathlib
+          import subprocess
+
+          base = os.environ["BASE_SHA"]
+          head = os.environ["HEAD_SHA"]
+
+          diff = subprocess.run(
+              ["git", "diff", "--name-only", "--diff-filter=ACMR", f"{base}...{head}"],
+              capture_output=True,
+              text=True,
+              check=True,
+          ).stdout
+
+          connectors = set()
+          for path in diff.splitlines():
+              parts = pathlib.PurePosixPath(path).parts
+              if len(parts) < 2 or parts[0].startswith("."):
+                  continue
+              connector = parts[0]
+              if pathlib.Path(connector, "tests").is_dir():
+                  connectors.add(connector)
+
+          matrix = json.dumps({"connector": sorted(connectors)}, separators=(",", ":"))
+          print(f"Connectors to test: {sorted(connectors) or 'none'}")
+
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as out:
+              out.write(f"matrix={matrix}\n")
+          EOF
+
+  test:
+    name: Test ${{ matrix.connector }}
+    needs: detect
+    if: needs.detect.outputs.matrix != '{"connector":[]}'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.detect.outputs.matrix) }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: '3.13'
+
+      - name: Install dependencies
+        env:
+          CONNECTOR_DIR: ${{ matrix.connector }}
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install fivetran_connector_sdk requests pytest
+          if [ -f "$CONNECTOR_DIR/requirements.txt" ]; then
+            python -m pip install -r "$CONNECTOR_DIR/requirements.txt"
+          fi
+
+      - name: Run tests
+        env:
+          CONNECTOR_DIR: ${{ matrix.connector }}
+        run: |
+          cd "$CONNECTOR_DIR"
+          python -m pytest tests/ -v
+
+  gate:
+    name: Connector tests passed
+    needs: [detect, test]
+    if: always()
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Fail if any connector test leg failed or was cancelled
+        env:
+          TEST_RESULT: ${{ needs.test.result }}
+        run: |
+          echo "Test job result: $TEST_RESULT"
+          if [ "$TEST_RESULT" = "failure" ] || [ "$TEST_RESULT" = "cancelled" ]; then
+            echo "One or more connector test suites failed. Fix them before merging."
+            exit 1
+          fi
