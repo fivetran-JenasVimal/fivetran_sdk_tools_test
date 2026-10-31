@@ -186,3 +186,20 @@ def test_safe_index_short_array_returns_none():
 
 def test_safe_index_returns_value_in_range():
     assert c._safe_index({"wave_height": [1.0, 2.5]}, "wave_height", 1) == 2.5
+
+
+# --- Intentionally faulty tests: these must fail so the gate turns red ---
+
+
+def test_faulty_404_is_expected_to_be_retried():
+    # Wrong on purpose: connector treats 404 as non-retryable, so 1 call is made, not 2.
+    session = ScriptedSession([FakeResponse(404), FakeResponse(payload={"ok": True})])
+
+    assert c.fetch_data_with_retry(session, "http://x") == {"ok": True}
+    assert session.calls == 2
+
+
+def test_faulty_short_array_expected_to_raise():
+    # Wrong on purpose: _safe_index returns None for a short array, it does not raise.
+    with pytest.raises(IndexError):
+        c._safe_index({"wave_height": [1.0]}, "wave_height", 5)
