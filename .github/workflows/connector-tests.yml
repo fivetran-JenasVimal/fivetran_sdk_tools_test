@@ -11,7 +11,7 @@ jobs:
     name: Detect changed connectors with tests
     runs-on: ubuntu-latest
     outputs:
-      matrix: ${{ steps.find.outputs.matrix }}
+      connectors: ${{ steps.find.outputs.connectors }}
 
     steps:
       - name: Checkout code
@@ -51,22 +51,19 @@ jobs:
               if pathlib.Path(connector, "tests").is_dir():
                   connectors.add(connector)
 
-          matrix = json.dumps({"connector": sorted(connectors)}, separators=(",", ":"))
+          connectors_json = json.dumps(sorted(connectors), separators=(",", ":"))
           print(f"Connectors to test: {sorted(connectors) or 'none'}")
 
           with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as out:
-              out.write(f"matrix={matrix}\n")
+              out.write(f"connectors={connectors_json}\n")
           EOF
 
-  test:
-    name: Test ${{ matrix.connector }}
+  tests:
+    name: Connector tests
     needs: detect
-    if: needs.detect.outputs.matrix != '{"connector":[]}'
+    if: needs.detect.outputs.connectors != '[]'
     runs-on: ubuntu-latest
-    timeout-minutes: 15
-    strategy:
-      fail-fast: false
-      matrix: ${{ fromJSON(needs.detect.outputs.matrix) }}
+    timeout-minutes: 30
 
     steps:
       - name: Checkout code
@@ -79,36 +76,56 @@ jobs:
         with:
           python-version: '3.13'
 
-      - name: Install dependencies
+      - name: Run tests for each changed connector
         env:
-          CONNECTOR_DIR: ${{ matrix.connector }}
+          CONNECTORS: ${{ needs.detect.outputs.connectors }}
+          RUNNER_TEMP_DIR: ${{ runner.temp }}
         run: |
-          python -m pip install --upgrade pip
-          python -m pip install fivetran_connector_sdk requests pytest
-          if [ -f "$CONNECTOR_DIR/requirements.txt" ]; then
-            python -m pip install -r "$CONNECTOR_DIR/requirements.txt"
-          fi
+          python3 <<'EOF'
+          import json
+          import os
+          import subprocess
+          import sys
+          import venv
+          from pathlib import Path
 
-      - name: Run tests
-        env:
-          CONNECTOR_DIR: ${{ matrix.connector }}
-        run: |
-          cd "$CONNECTOR_DIR"
-          python -m pytest tests/ -v
+          connectors = json.loads(os.environ["CONNECTORS"])
+          temp = Path(os.environ["RUNNER_TEMP_DIR"])
+          failed = []
 
-  gate:
-    name: Connector tests passed
-    needs: [detect, test]
-    if: always()
-    runs-on: ubuntu-latest
+          for connector in connectors:
+              print(f"::group::{connector}")
+              # One venv per connector: requirements pins can conflict across connectors.
+              env_dir = temp / f"venv-{connector}"
+              venv.create(env_dir, with_pip=True)
+              python = env_dir / "bin" / "python"
 
-    steps:
-      - name: Fail if any connector test leg failed or was cancelled
-        env:
-          TEST_RESULT: ${{ needs.test.result }}
-        run: |
-          echo "Test job result: $TEST_RESULT"
-          if [ "$TEST_RESULT" = "failure" ] || [ "$TEST_RESULT" = "cancelled" ]; then
-            echo "One or more connector test suites failed. Fix them before merging."
-            exit 1
-          fi
+              requirements = Path(connector, "requirements.txt")
+              install = [str(python), "-m", "pip", "install", "fivetran_connector_sdk", "requests", "pytest"]
+              if requirements.is_file():
+                  install += ["-r", str(requirements)]
+
+              result = subprocess.run(install, check=False)
+              if result.returncode == 0:
+                  result = subprocess.run(
+                      [str(python), "-m", "pytest", "tests/", "-v"],
+                      cwd=connector,
+                      check=False,
+                  )
+              print("::endgroup::")
+
+              if result.returncode != 0:
+                  failed.append(connector)
+
+          summary = os.environ.get("GITHUB_STEP_SUMMARY")
+          if summary:
+              with open(summary, "a", encoding="utf-8") as out:
+                  out.write("### Connector tests\n\n")
+                  for connector in connectors:
+                      status = "failed" if connector in failed else "passed"
+                      out.write(f"- `{connector}`: {status}\n")
+
+          if failed:
+              print(f"Failing connectors: {', '.join(failed)}")
+              sys.exit(1)
+          EOF
