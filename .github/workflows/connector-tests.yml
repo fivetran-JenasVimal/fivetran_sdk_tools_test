@@ -42,13 +42,14 @@ jobs:
               check=True,
           ).stdout
 
+          TEST_DIRS = ("tests", "test")
           connectors = set()
           for path in diff.splitlines():
               parts = pathlib.PurePosixPath(path).parts
               if len(parts) < 2 or parts[0].startswith("."):
                   continue
               connector = parts[0]
-              if pathlib.Path(connector, "tests").is_dir():
+              if any(pathlib.Path(connector, d).is_dir() for d in TEST_DIRS):
                   connectors.add(connector)
 
           connectors_json = json.dumps(sorted(connectors), separators=(",", ":"))
@@ -100,6 +101,7 @@ jobs:
               venv.create(env_dir, with_pip=True)
               python = env_dir / "bin" / "python"
 
+              test_dir = next(d for d in ("tests", "test") if Path(connector, d).is_dir())
               requirements = Path(connector, "requirements.txt")
               install = [str(python), "-m", "pip", "install", "fivetran_connector_sdk", "requests", "pytest"]
               if requirements.is_file():
@@ -108,7 +110,7 @@ jobs:
               result = subprocess.run(install, check=False)
               if result.returncode == 0:
                   result = subprocess.run(
-                      [str(python), "-m", "pytest", "tests/", "-v"],
+                      [str(python), "-m", "pytest", f"{test_dir}/", "-v"],
                       cwd=connector,
                       check=False,
                   )
