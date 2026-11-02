@@ -6,12 +6,21 @@ on:
 permissions:
   contents: read
 
+env:
+  # Minimum line coverage of connector.py (or the connector folder) required to pass.
+  COVERAGE_MIN: 50
+  # Only a user with triage/write+ access can apply labels to someone else's PR
+  # (fork contributors cannot label their own PR), so this label is an
+  # effective maintainer-only override. Apply it and re-run to bypass this check.
+  OVERRIDE_LABEL: skip-connector-tests
+
 jobs:
   detect:
-    name: Detect changed connectors with tests
+    name: Detect connectors to test
     runs-on: ubuntu-latest
     outputs:
       connectors: ${{ steps.find.outputs.connectors }}
+      overridden: ${{ steps.find.outputs.overridden }}
 
     steps:
       - name: Checkout code
@@ -20,11 +29,13 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Find changed connectors that have a tests directory
+      - name: Find connectors with pytest-collectible tests
         id: find
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_LABELS: ${{ toJSON(github.event.pull_request.labels.*.name) }}
+          OVERRIDE_LABEL: skip-connector-tests
         run: |
           python3 <<'EOF'
           import json
@@ -32,37 +43,81 @@ jobs:
           import pathlib
           import subprocess
 
+          labels = json.loads(os.environ["PR_LABELS"] or "[]")
+          overridden = os.environ["OVERRIDE_LABEL"] in labels
+          if overridden:
+              # Only a user with triage/write+ access can label another contributor's
+              # PR (fork authors cannot label their own), so this is an effective
+              # maintainer-only override.
+              print(f"'{os.environ['OVERRIDE_LABEL']}' label present - skipping connector tests.")
+              with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as out:
+                  out.write("connectors=[]\n")
+                  out.write("overridden=true\n")
+              raise SystemExit(0)
+
+          def is_pytest_file(p):
+              # pytest's own default collection rule: test_*.py or *_test.py.
+              return p.is_file() and p.suffix == ".py" and (
+                  p.name.startswith("test_") or p.name.endswith("_test.py")
+              )
+
+          def has_collectible_tests(connector):
+              # No folder-name convention required: a connector counts as soon as
+              # it contains any pytest-collectible file anywhere under it. Naming
+              # the folder "tests/" is just a convention, not what pytest itself
+              # looks for, so checking for the files directly catches more real
+              # cases (e.g. "connector_test_files/", "my_test/", a stray file at
+              # the connector root) without needing a directory-name allowlist.
+              return any(is_pytest_file(f) for f in pathlib.Path(connector).rglob("*.py"))
+
           base = os.environ["BASE_SHA"]
           head = os.environ["HEAD_SHA"]
 
+          all_connectors = sorted(
+              p.name
+              for p in pathlib.Path(".").iterdir()
+              if p.is_dir() and not p.name.startswith(".")
+              and has_collectible_tests(p.name)
+          )
+
+          # Include deleted files too, so a deletion still selects its connector.
           diff = subprocess.run(
-              ["git", "diff", "--name-only", "--diff-filter=ACMR", f"{base}...{head}"],
+              ["git", "diff", "--name-only", f"{base}...{head}"],
               capture_output=True,
               text=True,
               check=True,
           ).stdout
 
-          TEST_DIRS = ("tests", "test")
-          connectors = set()
+          changed = set()
+          shared_change = False
           for path in diff.splitlines():
               parts = pathlib.PurePosixPath(path).parts
-              if len(parts) < 2 or parts[0].startswith("."):
-                  continue
-              connector = parts[0]
-              if any(pathlib.Path(connector, d).is_dir() for d in TEST_DIRS):
-                  connectors.add(connector)
+              # A file at the repo root, or under a hidden folder such as .github,
+              # is shared code: run every connector that has tests.
+              if len(parts) == 1 or parts[0].startswith("."):
+                  shared_change = True
+              else:
+                  changed.add(parts[0])
 
-          connectors_json = json.dumps(sorted(connectors), separators=(",", ":"))
-          print(f"Connectors to test: {sorted(connectors) or 'none'}")
+          if shared_change:
+              selected = all_connectors
+          else:
+              selected = sorted(c for c in changed if c in all_connectors)
+
+          print(f"Connectors with tests: {all_connectors or 'none'}")
+          print(f"Shared/root change detected: {shared_change}")
+          print(f"Connectors to test: {selected or 'none'}")
 
           with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as out:
-              out.write(f"connectors={connectors_json}\n")
+              out.write(f"connectors={json.dumps(selected, separators=(',', ':'))}\n")
+              out.write("overridden=false\n")
           EOF
 
   tests:
     name: Connector tests
     needs: detect
-    if: needs.detect.outputs.connectors != '[]'
+    # Runs even when detect failed or found nothing, so the required check always reports.
+    if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 30
 
@@ -77,9 +132,12 @@ jobs:
         with:
           python-version: '3.13'
 
-      - name: Run tests for each changed connector
+      - name: Run tests for each selected connector
         env:
           CONNECTORS: ${{ needs.detect.outputs.connectors }}
+          OVERRIDDEN: ${{ needs.detect.outputs.overridden }}
+          DETECT_RESULT: ${{ needs.detect.result }}
+          COVERAGE_MIN: ${{ env.COVERAGE_MIN }}
           RUNNER_TEMP_DIR: ${{ runner.temp }}
         run: |
           python3 <<'EOF'
@@ -88,46 +146,92 @@ jobs:
           import subprocess
           import sys
           import venv
+          import xml.etree.ElementTree as ET
           from pathlib import Path
 
-          connectors = json.loads(os.environ["CONNECTORS"])
+          if os.environ["DETECT_RESULT"] != "success":
+              print("::error::Detect step did not succeed; cannot tell which connectors to test.")
+              sys.exit(1)
+
+          if os.environ.get("OVERRIDDEN") == "true":
+              print("Connector tests skipped: 'skip-connector-tests' label applied by a maintainer.")
+              sys.exit(0)
+
+          connectors = json.loads(os.environ["CONNECTORS"] or "[]")
+          if not connectors:
+              print("No connectors with tests changed. Nothing to run.")
+              sys.exit(0)
+
           temp = Path(os.environ["RUNNER_TEMP_DIR"])
-          failed = []
+          coverage_min = os.environ["COVERAGE_MIN"]
+          failed = {}
+
+          def skipped_count(junit_path):
+              if not junit_path.is_file():
+                  return None
+              root = ET.parse(junit_path).getroot()
+              return sum(int(suite.get("skipped", 0)) for suite in root.iter("testsuite"))
 
           for connector in connectors:
               print(f"::group::{connector}")
+              reasons = []
               # One venv per connector: requirements pins can conflict across connectors.
               env_dir = temp / f"venv-{connector}"
               venv.create(env_dir, with_pip=True)
               python = env_dir / "bin" / "python"
 
-              test_dir = next(d for d in ("tests", "test") if Path(connector, d).is_dir())
               requirements = Path(connector, "requirements.txt")
-              install = [str(python), "-m", "pip", "install", "fivetran_connector_sdk", "requests", "pytest"]
+              install = [
+                  str(python), "-m", "pip", "install",
+                  "fivetran_connector_sdk", "requests", "pytest", "pytest-cov",
+              ]
               if requirements.is_file():
                   install += ["-r", str(requirements)]
 
-              result = subprocess.run(install, check=False)
-              if result.returncode == 0:
+              if subprocess.run(install, check=False).returncode != 0:
+                  reasons.append("dependency install failed")
+              else:
+                  cov_target = "connector" if Path(connector, "connector.py").is_file() else "."
+                  junit_name = "junit.xml"
+                  junit = Path(connector, junit_name)
                   result = subprocess.run(
-                      [str(python), "-m", "pytest", f"{test_dir}/", "-v"],
+                      [
+                          str(python), "-m", "pytest", ".", "-v",
+                          f"--junitxml={junit_name}",
+                          f"--cov={cov_target}",
+                          "--cov-report=term",
+                          f"--cov-fail-under={coverage_min}",
+                      ],
                       cwd=connector,
                       check=False,
                   )
+                  if result.returncode == 5:
+                      reasons.append("pytest collected no tests (exit code 5)")
+                  elif result.returncode != 0:
+                      reasons.append(f"pytest exit code {result.returncode} (failed, or coverage below {coverage_min}%)")
+
+                  skipped = skipped_count(junit)
+                  if skipped is None:
+                      reasons.append("no JUnit report was produced")
+                  elif skipped > 0:
+                      reasons.append(f"{skipped} test(s) skipped; skips are not allowed")
               print("::endgroup::")
 
-              if result.returncode != 0:
-                  failed.append(connector)
+              if reasons:
+                  failed[connector] = reasons
 
           summary = os.environ.get("GITHUB_STEP_SUMMARY")
           if summary:
               with open(summary, "a", encoding="utf-8") as out:
                   out.write("### Connector tests\n\n")
                   for connector in connectors:
-                      status = "failed" if connector in failed else "passed"
-                      out.write(f"- `{connector}`: {status}\n")
+                      if connector in failed:
+                          out.write(f"- `{connector}`: failed. {'; '.join(failed[connector])}\n")
+                      else:
+                          out.write(f"- `{connector}`: passed\n")
 
           if failed:
-              print(f"Failing connectors: {', '.join(failed)}")
+              for connector, reasons in failed.items():
+                  print(f"::error::{connector}: {'; '.join(reasons)}")
               sys.exit(1)
           EOF
