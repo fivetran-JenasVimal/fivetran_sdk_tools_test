@@ -1,7 +1,7 @@
 # Runs pytest for any connector whose PR diff touches a pytest-collectible test
-# file (test_*.py / *_test.py). Two jobs: `detect` figures out which connectors
-# to test, `tests` actually runs them. Kept as two jobs so `tests` can run (and
-# report clearly) even if `detect` itself fails - see the `if: always()` below.
+# file (test_*.py / *_test.py). One job, one step: figures out which connectors
+# changed, then runs pytest for each. If detection logic raises an error, the
+# step itself fails - there's no separate job boundary to hide that behind.
 name: Connector Tests
 
 on:
@@ -21,14 +21,10 @@ env:
   OVERRIDE_LABEL: skip-connector-tests
 
 jobs:
-  detect:
-    name: Detect connectors to test
+  tests:
+    name: Connector tests
     runs-on: ubuntu-latest
-    outputs:
-      # JSON array of connector folder names to test, e.g. ["federal_register"].
-      connectors: ${{ steps.find.outputs.connectors }}
-      # "true" if a maintainer applied the skip-connector-tests label.
-      overridden: ${{ steps.find.outputs.overridden }}
+    timeout-minutes: 30
 
     steps:
       - name: Checkout code
@@ -39,32 +35,40 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Find connectors with pytest-collectible tests
-        id: find
+      - name: Set up Python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: '3.13'
+
+      - name: Detect connectors and run their tests
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           PR_LABELS: ${{ toJSON(github.event.pull_request.labels.*.name) }}
-          OVERRIDE_LABEL: skip-connector-tests
+          OVERRIDE_LABEL: ${{ env.OVERRIDE_LABEL }}
+          COVERAGE_MIN: ${{ env.COVERAGE_MIN }}
+          RUNNER_TEMP_DIR: ${{ runner.temp }}
         run: |
           python3 <<'EOF'
           import json
           import os
           import pathlib
           import subprocess
+          import sys
+          import venv
+          import xml.etree.ElementTree as ET
+          from pathlib import Path
 
           # --- Maintainer override: a labelled PR skips this check entirely ---
+          # Only a user with triage/write+ access can label another contributor's
+          # PR (fork authors cannot label their own), so this is an effective
+          # maintainer-only override.
           labels = json.loads(os.environ["PR_LABELS"] or "[]")
-          overridden = os.environ["OVERRIDE_LABEL"] in labels
-          if overridden:
-              # Only a user with triage/write+ access can label another contributor's
-              # PR (fork authors cannot label their own), so this is an effective
-              # maintainer-only override.
+          if os.environ["OVERRIDE_LABEL"] in labels:
               print(f"'{os.environ['OVERRIDE_LABEL']}' label present - skipping connector tests.")
-              with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as out:
-                  out.write("connectors=[]\n")
-                  out.write("overridden=true\n")
-              raise SystemExit(0)
+              sys.exit(0)
+
+          # --- Detect which connectors changed and have pytest-collectible tests ---
 
           def is_pytest_file_name(name):
               # pytest's own default collection rule: test_*.py or *_test.py.
@@ -108,80 +112,14 @@ jobs:
               ):
                   changed.add(parts[0])
 
-          selected = sorted(changed)
+          connectors = sorted(changed)
+          print(f"Connectors to test: {connectors or 'none'}")
 
-          print(f"Connectors to test: {selected or 'none'}")
-
-          # GITHUB_OUTPUT: GitHub Actions' mechanism for a step to pass values to
-          # later steps/jobs. Writing "key=value" lines here makes them readable
-          # as steps.find.outputs.<key> (and, via the job's `outputs:`, as
-          # needs.detect.outputs.<key> in the `tests` job below).
-          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as out:
-              out.write(f"connectors={json.dumps(selected, separators=(',', ':'))}\n")
-              out.write("overridden=false\n")
-          EOF
-
-  tests:
-    name: Connector tests
-    needs: detect
-    # Runs even when detect failed or found nothing, so the required check always reports.
-    # Without this, a `detect` crash would make GitHub mark `tests` (and the whole
-    # required check) as "skipped", which counts as a PASS for merge purposes -
-    # that's exactly the gap this `if: always()` closes.
-    if: always()
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-        with:
-          persist-credentials: false
-
-      - name: Set up Python
-        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
-        with:
-          python-version: '3.13'
-
-      - name: Run tests for each selected connector
-        env:
-          CONNECTORS: ${{ needs.detect.outputs.connectors }}
-          OVERRIDDEN: ${{ needs.detect.outputs.overridden }}
-          # needs.<job>.result is GitHub's own verdict on that job: success,
-          # failure, cancelled, or skipped. Checked explicitly below because
-          # `if: always()` on this job means it runs no matter what detect did -
-          # we still need to tell "detect succeeded with an empty list" apart
-          # from "detect itself blew up", and fail loudly on the latter.
-          DETECT_RESULT: ${{ needs.detect.result }}
-          COVERAGE_MIN: ${{ env.COVERAGE_MIN }}
-          RUNNER_TEMP_DIR: ${{ runner.temp }}
-        run: |
-          python3 <<'EOF'
-          import json
-          import os
-          import subprocess
-          import sys
-          import venv
-          import xml.etree.ElementTree as ET
-          from pathlib import Path
-
-          # Guard against the "detect crashed" case explained above: fail instead
-          # of silently treating a crash the same as "no connectors to test".
-          if os.environ["DETECT_RESULT"] != "success":
-              print("::error::Detect step did not succeed; cannot tell which connectors to test.")
-              sys.exit(1)
-
-          # Maintainer override: detect already set connectors=[] in this case,
-          # but we still want a clear, distinct message in the logs for why
-          # nothing ran, rather than the generic "nothing changed" message below.
-          if os.environ.get("OVERRIDDEN") == "true":
-              print("Connector tests skipped: 'skip-connector-tests' label applied by a maintainer.")
-              sys.exit(0)
-
-          connectors = json.loads(os.environ["CONNECTORS"] or "[]")
           if not connectors:
               print("No connectors with tests changed. Nothing to run.")
               sys.exit(0)
+
+          # --- Run pytest for each selected connector ---
 
           # runner.temp: a scratch directory unique to this job run, cleaned up
           # automatically afterward - used below to hold one venv per connector.
