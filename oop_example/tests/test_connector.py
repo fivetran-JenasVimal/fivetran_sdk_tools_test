@@ -48,5 +48,4 @@ def test_update_calls_upsert(monkeypatch):
 
     connector.update({"api_key": "k"}, state={})
 
-    ### Wrong input
-    assert calls == [("dummy", {"id": "3"}), ("dummy", {"id": "2"})]
+    assert calls == [("dummy", {"id": "1"}), ("dummy", {"id": "2"})]

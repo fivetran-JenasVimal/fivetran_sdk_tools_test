@@ -45,6 +45,7 @@ def test_fetch_data_success(monkeypatch):
 def test_fetch_data_handles_errors(monkeypatch):
     monkeypatch.setattr("builtins.open", mock_open(read_data="{}"))
     monkeypatch.setattr(nps_client.json, "load", lambda _: {"api_key": "abc"})
+    monkeypatch.setattr(nps_client.log, "warning", lambda *_: None)
     monkeypatch.setattr(
         nps_client.rq,
         "get",
