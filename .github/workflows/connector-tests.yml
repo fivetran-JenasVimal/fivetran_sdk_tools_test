@@ -249,11 +249,14 @@ jobs:
                       "status": "pass" if not reasons else "fail",
                   }
 
-                  # Print JUnit XML for reference
+                  # Print JUnit XML for reference (pretty-printed)
                   if junit.is_file():
                       print("\n--- JUnit XML Report ---")
+                      import xml.dom.minidom
                       with open(junit) as f:
-                          print(f.read())
+                          xml_content = f.read()
+                      dom = xml.dom.minidom.parseString(xml_content)
+                      print(dom.toprettyxml(indent="  "))
                       print("--- End JUnit XML ---\n")
 
               if reasons:
