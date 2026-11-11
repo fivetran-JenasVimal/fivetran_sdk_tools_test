@@ -60,6 +60,7 @@ def test_update_upserts_rows_for_each_table(monkeypatch):
     monkeypatch.setattr(connector.op, "upsert", lambda path, row: upserts.append((path, row)))
 
     connector.update({"api_key": "k"}, {})
+    ## ADding comment in test
 
     assert upserts == [
         ("table_one", {"id": 1}),
