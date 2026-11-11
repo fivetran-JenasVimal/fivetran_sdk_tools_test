@@ -264,6 +264,14 @@ jobs:
               status_icon = "✓" if stat.get("status") == "pass" else "✗"
               comment_lines.append(f"| `{connector}` | {tests} | {cov_str} | {status_icon} |")
 
+          # Add failure reasons if any failed
+          if failed:
+              comment_lines.append("")
+              comment_lines.append("**Failures:**")
+              for connector, reasons in failed.items():
+                  reasons_text = "; ".join(reasons)
+                  comment_lines.append(f"- `{connector}`: {reasons_text}")
+
           pr_comment = "\n".join(comment_lines)
           # Output to stdout for next step to capture
           print(pr_comment)
