@@ -285,15 +285,22 @@ jobs:
 
           # Build markdown table for PR comment with test stats.
           comment_lines = ["### Connector Test Results\n"]
-          comment_lines.append("| Connector | Tests | Coverage | Status |")
-          comment_lines.append("|-----------|-------|----------|--------|")
+          comment_lines.append("| Connector | Tests | Coverage | Tests Pass | Coverage OK |")
+          comment_lines.append("|-----------|-------|----------|------------|-------------|")
           for connector in connectors:
               stat = stats.get(connector, {})
               tests = stat.get("tests", "?")
               coverage = stat.get("coverage", "?")
               cov_str = f"{coverage}%" if coverage else "?"
-              status_icon = "✓" if stat.get("status") == "pass" else "✗"
-              comment_lines.append(f"| `{connector}` | {tests} | {cov_str} | {status_icon} |")
+
+              # Determine status icons
+              has_failures = any("pytest exit code" in reason for reason in failed.get(connector, []))
+              tests_icon = "❌" if has_failures else "✅"
+
+              coverage_val = stat.get("coverage", 0)
+              coverage_ok = "✅" if coverage_val >= int(coverage_min) else "❌"
+
+              comment_lines.append(f"| `{connector}` | {tests} | {cov_str} | {tests_icon} | {coverage_ok} |")
 
           # Add failure reasons if any failed
           if failed:
