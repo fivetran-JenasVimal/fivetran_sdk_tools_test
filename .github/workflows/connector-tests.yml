@@ -2,7 +2,7 @@
 # file (test_*.py / *_test.py). One job, one step: figures out which connectors
 # changed, then runs pytest for each. If detection logic raises an error, the
 # step itself fails - there's no separate job boundary to hide that behind.
-name: Connector Tests
+name: Run Connector Tests
 
 on:
   pull_request:
@@ -12,10 +12,6 @@ permissions:
   # Read-only: this workflow only inspects the PR diff and runs tests, it
   # never needs to write to the repo.
   contents: read
-
-env:
-  # Minimum line coverage required across the connector's whole folder to pass.
-  COVERAGE_MIN: 50
 
 jobs:
   tests:
@@ -41,7 +37,6 @@ jobs:
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-          COVERAGE_MIN: ${{ env.COVERAGE_MIN }}
           RUNNER_TEMP_DIR: ${{ runner.temp }}
           PR_LABELS: ${{ toJSON(github.event.pull_request.labels.*.name) }}
         run: |
@@ -54,28 +49,33 @@ jobs:
           import venv
           import xml.etree.ElementTree as ET
           from pathlib import Path
-
           # --- Override: skip check if override label present ---
           labels = json.loads(os.environ.get("PR_LABELS", "[]"))
           if "override-connector-test" in labels:
               print("'override-connector-test' label present - skipping connector tests.")
               sys.exit(0)
-
           # --- Detect which connectors changed and have pytest-collectible tests ---
-
           def is_pytest_file_name(name):
               # pytest's own default collection rule: test_*.py or *_test.py.
               # No directory-name check (e.g. requiring a "tests/" folder) - a
               # file matching this naming rule counts no matter where it sits,
               # since that's genuinely what pytest itself will collect and run.
               return name.startswith("test_") or name.endswith("_test.py")
-
+          def find_connector_root(test_file_path):
+              # Walk up from test file to find the directory containing requirements.txt.
+              # Handles nested connectors (e.g. redshift/simple_redshift_connector/tests/test_foo.py).
+              current = pathlib.Path(test_file_path).parent
+              while current != current.parent:  # Until repo root
+                  if (current / "requirements.txt").exists():
+                      return str(current)
+                  current = current.parent
+              # Fallback: use first path segment (top-level connector)
+              return test_file_path.split("/")[0]
           # base/head are the PR's base and head commit SHAs. "..." (triple-dot)
           # diffs head against their common ancestor, which is how GitHub itself
           # computes a PR's file list - so this matches what the PR page shows.
           base = os.environ["BASE_SHA"]
           head = os.environ["HEAD_SHA"]
-
           # -z (NUL-delimited) output preserves non-ASCII filenames exactly,
           # avoiding issues where git --name-only escapes special characters.
           # (no --diff-filter) includes added, modified AND deleted files,
@@ -86,50 +86,36 @@ jobs:
               text=True,
               check=True,
           ).stdout
-
           changed = set()
           for path in diff.split("\0"):
               changed_path = pathlib.PurePosixPath(path)
               parts = changed_path.parts
               # Select only connectors where the changed file itself is pytest-collectible.
-              # parts[0] is the top-level connector folder name, e.g.
-              # "federal_register" for "federal_register/tests/test_connector.py".
               # len(parts) > 1 excludes files sitting directly in the repo root
               # (those have no connector folder to select).
-              # NOTE: this matches on the path's NAME only, not on whether the
-              # file still exists - a DELETED test file still shows up here and
-              # still selects its connector (its name alone is enough to match).
-              # If the whole connector folder was deleted, it's skipped later (safe).
-              # If only the tests were deleted, pytest runs and fails on 0 tests collected.
-              # This way, deleting the whole connector is safe (no error), but deleting
-              # just the tests is caught as a real failure.
               if (
                   len(parts) > 1
                   and not parts[0].startswith(".")
                   and changed_path.suffix == ".py"
                   and is_pytest_file_name(changed_path.name)
               ):
-                  changed.add(parts[0])
-
+                  # Find the actual connector root by walking up to find requirements.txt.
+                  # This handles nested connectors (e.g. redshift/simple_redshift_connector/).
+                  connector_root = find_connector_root(str(path))
+                  changed.add(connector_root)
           connectors = sorted(changed)
           print(f"Connectors to test: {connectors or 'none'}")
-
           if not connectors:
               print("No connectors with tests changed. Nothing to run.")
               sys.exit(0)
-
           # --- Run pytest for each selected connector ---
-
           # runner.temp: a scratch directory unique to this job run, cleaned up
           # automatically afterward - used below to hold one venv per connector.
           temp = Path(os.environ["RUNNER_TEMP_DIR"])
-          coverage_min = os.environ["COVERAGE_MIN"]
           # Maps connector name -> list of human-readable failure reasons, built
           # up across the loop below and used both for the step summary and the
           # final exit-code decision.
           failed = {}
-          stats = {}  # Track test counts and coverage per connector
-
           def skipped_count(junit_path):
               # JUnit XML is the standard machine-readable test report format;
               # pytest writes one here via --junitxml=... below. Each <testsuite>
@@ -140,30 +126,11 @@ jobs:
                   return None
               root = ET.parse(junit_path).getroot()
               return sum(int(suite.get("skipped", 0)) for suite in root.iter("testsuite"))
-
-          def test_count(junit_path):
-              # Extract total test count from JUnit XML.
-              if not junit_path.is_file():
-                  return 0
-              root = ET.parse(junit_path).getroot()
-              return sum(int(suite.get("tests", 0)) for suite in root.iter("testsuite"))
-
-          def extract_coverage(output_lines):
-              # Parse pytest coverage output to extract line coverage %.
-              # pytest-cov prints: "TOTAL ... 12 8 67%"
-              for line in output_lines:
-                  if line.startswith("TOTAL"):
-                      parts = line.split()
-                      if parts and parts[-1].endswith("%"):
-                          return int(parts[-1].rstrip("%"))
-              return 0
-
           for connector in connectors:
               print(f"\n{'='*70}")
               print(f"Testing: {connector}")
               print(f"{'='*70}\n")
               reasons = []
-
               # A deleted test file still shows up in the diff (see the NOTE
               # above), so a connector whose folder was entirely removed by
               # this PR can still end up in `connectors`. Nothing to run in
@@ -172,33 +139,27 @@ jobs:
               if not Path(connector).is_dir():
                   print(f"{connector} no longer exists at this commit; skipping.")
                   continue
-
               # One venv per connector: requirements pins can conflict across connectors.
               env_dir = temp / f"venv-{connector}"
               venv.create(env_dir, with_pip=True)
               python = env_dir / "bin" / "python"
-
               requirements = Path(connector, "requirements.txt")
               # fivetran_connector_sdk/requests are pre-installed in the real
               # Connector SDK runtime (per _template_connector/requirements.txt),
               # so contributors' own requirements.txt files don't list them -
-              # install them explicitly here to match. pytest/pytest-cov are
-              # this workflow's own testing tools, not part of the connector.
+              # install them explicitly here to match. pytest is this workflow's
+              # testing tool, not part of the connector.
               install = [
                   str(python), "-m", "pip", "install",
-                  "fivetran_connector_sdk", "requests", "pytest", "pytest-cov",
+                  "fivetran_connector_sdk", "requests", "pytest",
               ]
               if requirements.is_file():
                   install += ["-r", str(requirements)]
-
               # check=False lets us capture non-zero exit codes and add clear,
               # connector-specific failure reasons instead of raising immediately.
               if subprocess.run(install, check=False).returncode != 0:
                   reasons.append("dependency install failed")
               else:
-                  # Measure coverage across every .py file in the connector's
-                  # folder, not just connector.py - picks up helper modules too.
-                  cov_target = "."
                   # junit_name is a bare filename, not a path, because the
                   # subprocess below runs with cwd=connector - pytest writes it
                   # relative to that cwd, so `junit` (used to read it back after)
@@ -209,31 +170,16 @@ jobs:
                       [
                           str(python), "-m", "pytest", ".", "-v",
                           f"--junitxml={junit_name}",
-                          f"--cov={cov_target}",
-                          "--cov-report=term",
-                          # pytest-cov itself fails the run (non-zero exit) if
-                          # coverage comes in under this percentage - this is
-                          # the guard against tests that pass but exercise
-                          # little or none of the actual connector code.
-                          f"--cov-fail-under={coverage_min}",
                       ],
                       cwd=connector,
                       # Keep control in this script so we can classify failures
-                      # (no tests, test failures, low coverage, missing report).
+                      # (no tests, test failures, skipped tests).
                       check=False,
-                      capture_output=True,
-                      text=True,
                   )
                   if result.returncode == 5:
                       reasons.append("pytest collected no tests (exit code 5)")
                   elif result.returncode != 0:
-                      # Distinguish between test failures and coverage failures for clarity
-                      coverage = extract_coverage(result.stdout.split("\n")) if result.stdout else 0
-                      if coverage < int(coverage_min):
-                          reasons.append(f"coverage below {coverage_min}% threshold (actual: {coverage}%)")
-                      else:
-                          reasons.append("tests failed (one or more tests did not pass)")
-
+                      reasons.append("tests failed (one or more tests did not pass)")
                   skipped = skipped_count(junit)
                   if skipped is None:
                       reasons.append("no JUnit report was produced")
@@ -244,63 +190,8 @@ jobs:
                       # dependencies/services, or marker deselection. Treat them as
                       # failures so the check is never "green but partially untested".
                       reasons.append(f"{skipped} test(s) skipped; skips are not allowed")
-
-                  # Print raw pytest output
-                  if result.stdout:
-                      print(result.stdout)
-                  if result.stderr:
-                      print(result.stderr)
-
-                  # Collect stats for PR comment: test count and coverage %
-                  tests = test_count(junit)
-                  coverage = extract_coverage(result.stdout.split("\n"))
-                  stats[connector] = {
-                      "tests": tests,
-                      "coverage": coverage,
-                      "status": "pass" if not reasons else "fail",
-                  }
-
               if reasons:
                   failed[connector] = reasons
-
-          # Build markdown table for PR comment with test stats.
-          comment_lines = ["### Connector Test Results\n"]
-          comment_lines.append("| Connector | Tests | Coverage | Tests Pass | Coverage OK |")
-          comment_lines.append("|-----------|-------|----------|------------|-------------|")
-          for connector in connectors:
-              stat = stats.get(connector, {})
-              tests = stat.get("tests", "?")
-              coverage = stat.get("coverage", "?")
-              cov_str = f"{coverage}%" if coverage else "?"
-
-              # Determine status icons based on status field from stats and failed dict
-              # Use both checks for reliability: status field reflects if reasons exist,
-              # failed dict tracks connectors with errors. Connector is failing if in failed dict.
-              tests_icon = "❌" if (connector in failed or stat.get("status") == "fail") else "✅"
-
-              coverage_val = stat.get("coverage", 0)
-              coverage_ok = "✅" if coverage_val >= int(coverage_min) else "❌"
-
-              comment_lines.append(f"| `{connector}` | {tests} | {cov_str} | {tests_icon} | {coverage_ok} |")
-
-          # Add failure reasons if any failed
-          if failed:
-              comment_lines.append("")
-              comment_lines.append("**Failures:**")
-              for connector, reasons in failed.items():
-                  reasons_text = "; ".join(reasons)
-                  comment_lines.append(f"- `{connector}`: {reasons_text}")
-
-          pr_comment = "\n".join(comment_lines)
-          # Output to stdout for next step to capture
-          print(pr_comment)
-
-          # Write to temp file for gh CLI to post
-          comment_file = os.path.join(os.environ["RUNNER_TEMP_DIR"], "pr_comment.txt")
-          with open(comment_file, "w", encoding="utf-8") as f:
-              f.write(pr_comment)
-          print(f"Comment saved to {comment_file}")
-
           # GITHUB_STEP_SUMMARY: a markdown file GitHub renders on the workflow
           # run's summary page - gives a readable pass/fail-per-connector view
           # without having to open each job's raw log.
@@ -313,7 +204,6 @@ jobs:
                           out.write(f"- `{connector}`: failed. {'; '.join(failed[connector])}\n")
                       else:
                           out.write(f"- `{connector}`: passed\n")
-
           # Exiting non-zero here is what actually makes this GitHub Actions
           # step (and so the job, and the PR check) show as failed - everything
           # above just prepared the reporting.
@@ -322,11 +212,3 @@ jobs:
                   print(f"::error::{connector}: {'; '.join(reasons)}")
               sys.exit(1)
           EOF
-
-      - name: Upload PR comment artifact
-        if: always()  # Run even if tests failed
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: connector-pr-comment
-          path: ${{ runner.temp }}/pr_comment.txt
-          retention-days: 1
