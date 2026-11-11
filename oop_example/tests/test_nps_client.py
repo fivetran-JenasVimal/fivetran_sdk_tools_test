@@ -41,7 +41,7 @@ def test_fetch_data_returns_endpoint_data(monkeypatch):
     client.limit = 3
     client.base_url = "https://example.com"
 
-    assert client.fetch_data("parks") == {"parks": [{"id": "p1"}]}
+    assert client.fetch_data("parks") == {"parks": [{"id": "p100"}]}
 
 
 def test_fetch_data_returns_empty_on_request_error(monkeypatch):
