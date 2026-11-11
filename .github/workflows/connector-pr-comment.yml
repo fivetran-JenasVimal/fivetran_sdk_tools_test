@@ -46,12 +46,36 @@ jobs:
             const issueNumber = pr.number;
             const commentPath = process.env.COMMENT_PATH;
 
-            if (!fs.existsSync(commentPath)) {
-              core.warning("Connector test comment artifact not found.");
+            // Reject results for outdated PR heads: only post if this run's commit
+            // matches the PR's current head. Prevents race: slow old run overwrites fast new run.
+            if (run.head_sha !== pr.head.sha) {
+              core.info(`Skipping stale run: run commit ${run.head_sha} != PR head ${pr.head.sha}`);
               return;
             }
 
-            const stats = fs.readFileSync(commentPath, "utf8");
+            // Reject results if a newer run exists for this PR (e.g., label-triggered).
+            // Prevents label-triggered skip run from being overwritten by original test run.
+            const runs = await github.rest.actions.listWorkflowRuns({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              workflow_id: "connector-tests.yml",
+              per_page: 20,
+            });
+
+            const prRuns = runs.data.workflow_runs.filter(r =>
+              r.pull_requests?.some(pr_item => pr_item.number === issueNumber)
+            );
+
+            if (prRuns.length > 0 && prRuns[0].id !== run.id) {
+              core.info(`Skipping: newer run ${prRuns[0].id} exists for PR #${issueNumber}`);
+              return;
+            }
+
+            // Always produce a comment: either with test results or with run state.
+            // Prevents stale results when override label skips run, tests fail, etc.
+            const stats = fs.existsSync(commentPath)
+              ? fs.readFileSync(commentPath, "utf8")
+              : `No connector test report was produced for this run.\n\nWorkflow conclusion: **${run.conclusion || "unknown"}**`;
             if (stats.length > 8192) {
               throw new Error("Connector test comment is too large");
             }
