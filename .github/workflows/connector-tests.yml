@@ -249,15 +249,11 @@ jobs:
                       "status": "pass" if not reasons else "fail",
                   }
 
-                  # Print JUnit XML for reference (pretty-printed)
-                  if junit.is_file():
-                      print("\n--- JUnit XML Report ---")
-                      import xml.dom.minidom
-                      with open(junit) as f:
-                          xml_content = f.read()
-                      dom = xml.dom.minidom.parseString(xml_content)
-                      print(dom.toprettyxml(indent="  "))
-                      print("--- End JUnit XML ---\n")
+                  # Print raw pytest output
+                  if result.stdout:
+                      print(result.stdout)
+                  if result.stderr:
+                      print(result.stderr)
 
               if reasons:
                   failed[connector] = reasons
