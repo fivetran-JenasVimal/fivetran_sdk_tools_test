@@ -304,14 +304,10 @@ jobs:
               sys.exit(1)
           EOF
 
-      - name: Post test results to PR
-        if: always()  # Run even if Python step failed
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-          RUNNER_TEMP_DIR: ${{ runner.temp }}
-        run: |
-          COMMENT_FILE="${RUNNER_TEMP_DIR}/pr_comment.txt"
-          if [ -f "$COMMENT_FILE" ]; then
-            gh pr comment "$PR_NUMBER" --body "$(cat "$COMMENT_FILE")"
-          fi
+      - name: Upload PR comment artifact
+        if: always()  # Run even if tests failed
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: connector-pr-comment
+          path: ${{ runner.temp }}/pr_comment.txt
+          retention-days: 1
