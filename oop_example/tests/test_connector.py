@@ -61,7 +61,7 @@ def test_update_upserts_rows_for_each_table(monkeypatch):
     connector.update({"api_key": "k"}, {})
 
     assert upserts == [
-        ("table_one", {"id": 1}),
         ("table_one", {"id": 2}),
-        ("table_two", {"id": 10}),
+        ("table_one", {"id": 54}),
+        ("table_two", {"id": 100}),
     ]

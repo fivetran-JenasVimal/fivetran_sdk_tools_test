@@ -20,7 +20,7 @@ def test_alerts_process_data_maps_fields(monkeypatch):
         lambda *_: {
             "alerts": [
                 {
-                    "id": "a1",
+                    "id": "100",
                     "parkCode": "yose",
                     "title": "Alert title",
                     "description": "Alert description",

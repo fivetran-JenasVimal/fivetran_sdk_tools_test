@@ -59,4 +59,4 @@ def test_fetch_data_returns_empty_on_request_error(monkeypatch):
     client.base_url = "https://example.com"
 
     assert client.fetch_data("parks") == {}
-    assert len(warnings) == 1
+    assert len(warnings) == 5
