@@ -240,6 +240,12 @@ jobs:
                       # failures so the check is never "green but partially untested".
                       reasons.append(f"{skipped} test(s) skipped; skips are not allowed")
 
+                  # Print raw pytest output
+                  if result.stdout:
+                      print(result.stdout)
+                  if result.stderr:
+                      print(result.stderr)
+
                   # Collect stats for PR comment: test count and coverage %
                   tests = test_count(junit)
                   coverage = extract_coverage(result.stdout.split("\n"))
