@@ -29,6 +29,7 @@ class _Operations:
     def upsert(_path, _row):
         return None
 
+## Adding comment
 
 sdk_module.Connector = _Connector
 sdk_module.Logging = _Logging
