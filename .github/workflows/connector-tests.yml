@@ -249,6 +249,13 @@ jobs:
                       "status": "pass" if not reasons else "fail",
                   }
 
+                  # Print JUnit XML for reference
+                  if junit.is_file():
+                      print("\n--- JUnit XML Report ---")
+                      with open(junit) as f:
+                          print(f.read())
+                      print("--- End JUnit XML ---\n")
+
               if reasons:
                   failed[connector] = reasons
 
