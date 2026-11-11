@@ -227,7 +227,12 @@ jobs:
                   if result.returncode == 5:
                       reasons.append("pytest collected no tests (exit code 5)")
                   elif result.returncode != 0:
-                      reasons.append(f"pytest exit code {result.returncode} (failed, or coverage below {coverage_min}%)")
+                      # Distinguish between test failures and coverage failures for clarity
+                      coverage = extract_coverage(result.stdout.split("\n")) if result.stdout else 0
+                      if coverage < int(coverage_min):
+                          reasons.append(f"coverage below {coverage_min}% threshold (actual: {coverage}%)")
+                      else:
+                          reasons.append("tests failed (one or more tests did not pass)")
 
                   skipped = skipped_count(junit)
                   if skipped is None:
@@ -239,12 +244,6 @@ jobs:
                       # dependencies/services, or marker deselection. Treat them as
                       # failures so the check is never "green but partially untested".
                       reasons.append(f"{skipped} test(s) skipped; skips are not allowed")
-
-                  # Print raw pytest output
-                  if result.stdout:
-                      print(result.stdout)
-                  if result.stderr:
-                      print(result.stderr)
 
                   # Collect stats for PR comment: test count and coverage %
                   tests = test_count(junit)
@@ -260,23 +259,15 @@ jobs:
 
           # Build markdown table for PR comment with test stats.
           comment_lines = ["### Connector Test Results\n"]
-          comment_lines.append("| Connector | Tests | Coverage | Tests Pass | Coverage OK |")
-          comment_lines.append("|-----------|-------|----------|------------|-------------|")
+          comment_lines.append("| Connector | Tests | Coverage | Status |")
+          comment_lines.append("|-----------|-------|----------|--------|")
           for connector in connectors:
               stat = stats.get(connector, {})
               tests = stat.get("tests", "?")
               coverage = stat.get("coverage", "?")
               cov_str = f"{coverage}%" if coverage else "?"
-
-              # Determine status icons based on status field from stats and failed dict
-              # Use both checks for reliability: status field reflects if reasons exist,
-              # failed dict tracks connectors with errors. Connector is failing if in failed dict.
-              tests_icon = "❌" if (connector in failed or stat.get("status") == "fail") else "✅"
-
-              coverage_val = stat.get("coverage", 0)
-              coverage_ok = "✅" if coverage_val >= int(coverage_min) else "❌"
-
-              comment_lines.append(f"| `{connector}` | {tests} | {cov_str} | {tests_icon} | {coverage_ok} |")
+              status_icon = "✓" if stat.get("status") == "pass" else "✗"
+              comment_lines.append(f"| `{connector}` | {tests} | {cov_str} | {status_icon} |")
 
           # Add failure reasons if any failed
           if failed:
