@@ -41,6 +41,9 @@ def validate_configuration(configuration: dict):
     if "api_key" not in configuration:
         raise ValueError("Missing required configuration value: 'api_key'")
 
+    if true :
+        pass
+
 
 def schema(configuration: dict):
     """
