@@ -124,6 +124,7 @@ jobs:
           # automatically afterward - used below to hold one venv per connector.
           temp = Path(os.environ["RUNNER_TEMP_DIR"])
           coverage_min = os.environ["COVERAGE_MIN"]
+          coverage_min_int = int(coverage_min)
           # Maps connector name -> list of human-readable failure reasons, built
           # up across the loop below and used both for the step summary and the
           # final exit-code decision.
@@ -147,6 +148,15 @@ jobs:
                   return 0
               root = ET.parse(junit_path).getroot()
               return sum(int(suite.get("tests", 0)) for suite in root.iter("testsuite"))
+
+          def failed_count(junit_path):
+              # Extract failed test count (failures + errors) from JUnit XML.
+              if not junit_path.is_file():
+                  return 0
+              root = ET.parse(junit_path).getroot()
+              failures = sum(int(suite.get("failures", 0)) for suite in root.iter("testsuite"))
+              errors = sum(int(suite.get("errors", 0)) for suite in root.iter("testsuite"))
+              return failures + errors
 
           def extract_coverage(output_lines):
               # Parse pytest coverage output to extract line coverage %.
@@ -224,10 +234,27 @@ jobs:
                       capture_output=True,
                       text=True,
                   )
+
+                  stdout_lines = result.stdout.split("\n")
+                  coverage = extract_coverage(stdout_lines)
+                  tests = test_count(junit)
+                  failed_tests = failed_count(junit)
+                  coverage_failure = (
+                      "FAIL Required test coverage" in result.stdout
+                      or coverage < coverage_min_int
+                  )
+
                   if result.returncode == 5:
                       reasons.append("pytest collected no tests (exit code 5)")
-                  elif result.returncode != 0:
-                      reasons.append(f"pytest exit code {result.returncode} (failed, or coverage below {coverage_min}%)")
+                  else:
+                      if failed_tests > 0:
+                          reasons.append(f"{failed_tests} test(s) failed")
+                      if coverage_failure:
+                          reasons.append(
+                              f"coverage {coverage}% is below required {coverage_min_int}%"
+                          )
+                      if result.returncode != 0 and not reasons:
+                          reasons.append(f"pytest exit code {result.returncode}")
 
                   skipped = skipped_count(junit)
                   if skipped is None:
@@ -241,8 +268,6 @@ jobs:
                       reasons.append(f"{skipped} test(s) skipped; skips are not allowed")
 
                   # Collect stats for PR comment: test count and coverage %
-                  tests = test_count(junit)
-                  coverage = extract_coverage(result.stdout.split("\n"))
                   stats[connector] = {
                       "tests": tests,
                       "coverage": coverage,
